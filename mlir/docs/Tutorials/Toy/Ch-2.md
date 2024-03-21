@@ -7,15 +7,16 @@ help to compile Toy.
 
 ## Introduction: Multi-Level Intermediate Representation
 
-Other compilers, like LLVM (see the
-[Kaleidoscope tutorial](https://llvm.org/docs/tutorial/MyFirstLanguageFrontend/index.html)),
-offer a fixed set of predefined types and (usually *low-level* / RISC-like)
-instructions. It is up to the frontend for a given language to perform any
-language-specific type-checking, analysis, or transformation before emitting
-LLVM IR. For example, Clang will use its AST to perform not only static analysis
-but also transformations, such as C++ template instantiation through AST cloning
-and rewrite. Finally, languages with construction at a higher-level than C/C++
-may require non-trivial lowering from their AST to generate LLVM IR.
+Other compilers, like LLVM (see the [Kaleidoscope
+tutorial](https://llvm.org/docs/tutorial/MyFirstLanguageFrontend/index.html)),
+offer a fixed set of predefined types and instructions. The instructions are
+typically *low-level* and RISC-like. It is up to the frontend for a given
+language to perform any language-specific type-checking, analysis, or
+transformation before emitting LLVM IR. For example, Clang will use its AST to
+perform not only static analysis but also transformations, such as C++ template
+instantiation through AST cloning and rewrite. Finally, languages with
+construction at a higher-level than C/C++ may require non-trivial lowering from
+their AST to generate LLVM IR.
 
 As a consequence, multiple frontends end up reimplementing significant pieces of
 infrastructure to support the need for these analyses and transformation. MLIR
@@ -26,19 +27,35 @@ pre-defined instructions (*operations* in MLIR terminology) or types.
 
 [Language Reference](../../LangRef.md)
 
-MLIR is designed to be a completely extensible infrastructure; there is no
-closed set of attributes (think: constant metadata), operations, or types. MLIR
-supports this extensibility with the concept of
-[Dialects](../../LangRef.md/#dialects). Dialects provide a grouping mechanism for
-abstraction under a unique `namespace`.
+MLIR is designed to be a completely extensible infrastructure. There is no
+closed set of operations, types, or attributes . MLIR supports this
+extensibility with the concept of [Dialects](../../LangRef.md/#dialects).
+Dialects provide a grouping mechanism for abstraction under a unique
+namespace.
 
-In MLIR, [`Operations`](../../LangRef.md/#operations) are the core unit of
-abstraction and computation, similar in many ways to LLVM instructions.
-Operations can have application-specific semantics and can be used to represent
-all of the core IR structures in LLVM: instructions, globals (like functions),
-modules, etc.
+In MLIR, [`operations`](../../LangRef.md/#operations) are the core unit of
+abstraction and computation. They play a similar role to LLVM instructions.
+However, operations are more general, able to nest and contain other
+operations, and their semantics can be application-specific. They are used to
+represent all of the core IR structures found in LLVM: instructions, globals
+(such as functions), modules, etc.
 
-Here is the MLIR assembly for the Toy `transpose` operations:
+While operations are meant to be a flexible and generic notion, each operation
+has the following data, which we use to reason about and manipulate it:
+
+-   The name of the operation.
+-   A list of SSA operand values.
+-   A list of [attributes](../../LangRef.md/#attributes).
+-   A list of [types](../../LangRef.md/#type-system) for the arguments and
+    result values.
+-   A [source location](../../Diagnostics.md/#source-locations) for debugging
+    purposes.
+-   A list of successors [blocks](../../LangRef.md/#blocks), used for
+    branch-like operations.
+-   A list of [regions](../../LangRef.md/#regions), used for structural
+    operations like functions.
+
+To illustrate these, here is the MLIR assembly for an example `transpose` operation we will use in our Toy dialect:
 
 ```mlir
 %t_tensor = "toy.transpose"(%tensor) {inplace = true} : (tensor<2x3xf64>) -> tensor<3x2xf64> loc("example/file/path":12:1)
@@ -83,21 +100,6 @@ Let's break down the anatomy of this MLIR operation:
     *   This is the location in the source code from which this operation
         originated.
 
-Shown here is the general form of an operation. As described above,
-the set of operations in MLIR is extensible. Operations are modeled
-using a small set of concepts, enabling operations to be reasoned
-about and manipulated generically. These concepts are:
-
--   A name for the operation.
--   A list of SSA operand values.
--   A list of [attributes](../../LangRef.md/#attributes).
--   A list of [types](../../LangRef.md/#type-system) for result values.
--   A [source location](../../Diagnostics.md/#source-locations) for debugging
-    purposes.
--   A list of successors [blocks](../../LangRef.md/#blocks) (for branches,
-    mostly).
--   A list of [regions](../../LangRef.md/#regions) (for structural operations
-    like functions).
 
 In MLIR, every operation has a mandatory source location associated with it.
 Contrary to LLVM, where debug info locations are metadata and can be dropped, in
@@ -108,19 +110,27 @@ To provide an illustration: If a transformation replaces an operation by
 another, that new operation must still have a location attached. This makes it
 possible to track where that operation came from.
 
-It's worth noting that the mlir-opt tool - a tool for testing
-compiler passes - does not include locations in the output by default. The
+MLIR ships with a tool called `mlir-opt` for testing compiler passes. It's
+worth noting that it does not include locations in the output by default. The
 `-mlir-print-debuginfo` flag specifies to include locations. (Run `mlir-opt
 --help` for more options.)
 
-### Opaque API
+### Working with Unregistered Dialects
 
-MLIR is designed to allow all IR elements, such as attributes, operations, and
-types, to be customized. At the same time, IR elements can always be reduced to
-the above fundamental concepts. This allows MLIR to parse, represent, and
-[round-trip](../../../getting_started/Glossary.md/#round-trip) IR for *any*
-operation. For example, we could place our Toy operation from above into an
-`.mlir` file and round-trip through *mlir-opt* without registering any `toy`
+Since MLIR is designed to be extensible, the set of operations, types,
+attributes, and other IR elements is not fixed. Any compiler will ultimately
+need to decide on a fixed set to work with. This is done by registering the
+dialects it is interested in.
+
+However, we can still work with arbitrary MLIR generically, regardless of
+whether or not all the dialects have been registered. Because all IR elements have the same
+structural pieces (eg, a name, SSA operand values, attributes, argument and
+return types, etc), we can use MLIR to represent, parse, and
+[round-trip](../../../getting_started/Glossary.md/#round-trip) IR for any
+`.mlir` file.
+
+For example, we could place our Toy operation from above into an
+`.mlir` file and round-trip through `mlir-opt` without registering any `toy`
 related dialect:
 
 ```mlir
@@ -130,18 +140,28 @@ func.func @toy_func(%tensor: tensor<2x3xf64>) -> tensor<3x2xf64> {
 }
 ```
 
-In the cases of unregistered attributes, operations, and types, MLIR will
-enforce some structural constraints (e.g. dominance, etc.), but otherwise they
-are completely opaque. For instance, MLIR has little information about whether
-an unregistered operation can operate on particular data types, how many
-operands it can take, or how many results it produces. This flexibility can be
-useful for bootstrapping purposes, but it is generally advised against in mature
-systems. Unregistered operations must be treated conservatively by
-transformations and analyses, and they are much harder to construct and
-manipulate.
+```console
+mlir-opt --allow-unregistered-dialect example.mlir
+```
 
-This handling can be observed by crafting what should be an invalid IR for Toy
-and seeing it round-trip without tripping the verifier:
+As you can see, this prints the same MLIR code, albeit with a few insignificant
+changes in whitespace.
+
+In the cases of unregistered attributes, operations, and types, MLIR will
+enforce some basic structural constraints (e.g. dominance, etc.), but because
+it doesn't know the rules for the dialect, it cannot verify the code adheres to
+any dialect-specific constraints. For instance, when `mlir-opt` encounters an
+unregistered operation, it has no information about what data types it accepts,
+nor how many operands it can take, nor how many results it produces.
+
+Using unregistered dialects is useful for prototpying, but because unregistered
+operations must be handled conservatively, they are not used in production
+systems.
+
+In addition to the syntactic and basic structural checks required by MLIR, each
+dialect may impose additional constraints on its well-formedness. These are
+checked whenever IR from the dialect is loaded using the notion of verifiers.
+In our Toy dialect, consider the following code invalid:
 
 ```mlir
 func.func @main() {
@@ -149,16 +169,21 @@ func.func @main() {
 }
 ```
 
-There are multiple problems here: the `toy.print` operation is not a terminator;
-it should take an operand; and it shouldn't return any values. In the next
-section, we will register our dialect and operations with MLIR, plug into the
-verifier, and add nicer APIs to manipulate our operations.
+There are a few reasons we wish to consider this invalid:
+
+- the `toy.print` operation is not a terminator, and yet appears at the end of
+  a function (a `func.func` operation).
+- it should take an operand, indicating the message to print.
+- it returns a result, but shouldn't return any result.
+
+In the next section, we will register our dialect and operations with MLIR,
+plug into the verifier, and add nicer APIs to manipulate our operations.
 
 ## Defining a Toy Dialect
 
-To effectively interface with MLIR, we will define a new Toy dialect. This
-dialect will model the structure of the Toy language, as well as provide an easy
-avenue for high-level analysis and transformation.
+To interface with MLIR, we will define a new Toy dialect. This dialect will
+model the structure of the Toy language, as well as provide an easy avenue for
+high-level analysis and transformation.
 
 ```c++
 /// This is the definition of the Toy dialect. A dialect inherits from
@@ -218,13 +243,13 @@ To see what this generates, we can run the `mlir-tblgen` command with the
 ${build_root}/bin/mlir-tblgen -gen-dialect-decls ${mlir_src_root}/examples/toy/Ch2/include/toy/Ops.td -I ${mlir_src_root}/include/
 ```
 
-After the dialect has been defined, it can now be loaded into an MLIRContext:
+After the dialect has been defined, it can now be loaded into an `MLIRContext` object:
 
 ```c++
   context.loadDialect<ToyDialect>();
 ```
 
-By default, an `MLIRContext` only loads the
+By default, the `MLIRContext` only loads the
 [Builtin Dialect](../../Dialects/Builtin.md), which provides a few core IR
 components, meaning that other dialects, such as our `Toy` dialect, must be
 explicitly loaded.
@@ -240,16 +265,27 @@ operation. This operation will represent a constant value in the Toy language.
  %4 = "toy.constant"() {value = dense<1.0> : tensor<2x3xf64>} : () -> tensor<2x3xf64>
 ```
 
-This operation takes zero operands, a
-[dense elements](../../Dialects/Builtin.md/#denseintorfpelementsattr) attribute named
-`value` to represent the constant value, and returns a single result of
-[RankedTensorType](../../Dialects/Builtin.md/#rankedtensortype). An operation class 
-inherits from the [CRTP](https://en.wikipedia.org/wiki/Curiously_recurring_template_pattern)
-`mlir::Op` class which also takes some optional [*traits*](../../Traits.md) to
-customize its behavior. `Traits` are a mechanism with which we can inject
-additional behavior into an Operation, such as additional accessors,
-verification, and more. Let's look below at a possible definition for the
-constant operation that we have described above:
+This operation takes zero operands, an attribute named `value` to represent the
+constant value, and returns a single result.
+
+An operation class inherits from the `mlir::Op` class. We can see in the
+example below that this uses the
+[CRTP](https://en.wikipedia.org/wiki/Curiously_recurring_template_pattern)
+pattern, meaning the first template argument to `mlir::Op` must be the name of
+the class we are defining.
+
+In MLIR, the definition of an operation may be annotated with zero or more
+[traits](../../Traits.md). The trait mechanism allows MLIR to handle special
+classes of operations generically. Here, we use them to indicate the (empty)
+arguments and return type (a single result of type
+[RankedTensorType](../../Dialects/Builtin.md/#rankedtensortype)). Traits are
+also used to indicate more nuanced properties on an operation, such as its
+memory access or whether or not it has side-effects. The traits for an
+operation are given as additional arguments to the class template in the MLIR
+code.
+
+Let's look below at a possible definition for the constant operation that we
+have described above:
 
 ```c++
 class ConstantOp : public mlir::Op<
@@ -310,27 +346,30 @@ void ToyDialect::initialize() {
 }
 ```
 
-### Op vs Operation: Using MLIR Operations
+### `Op` vs `Operation`: Using MLIR Operations
 
 Now that we have defined an operation, we will want to access and transform it.
 In MLIR, there are two main classes related to operations: `Operation` and `Op`.
+
 The `Operation` class is used to generically model all operations. It is
 'opaque', in the sense that it does not describe the properties of particular
 operations or types of operations. Instead, the `Operation` class provides a
-general API into an operation instance. On the other hand, each specific type of
-operation is represented by an `Op` derived class. For instance `ConstantOp`
-represents a operation with zero inputs, and one output, which is always set to
-the same value. `Op` derived classes act as smart pointer wrapper around a
-`Operation*`, provide operation-specific accessor methods, and type-safe
-properties of operations. This means that when we define our Toy operations, we
-are simply defining a clean, semantically useful interface for building and
-interfacing with the `Operation` class. This is why our `ConstantOp` defines no
-class fields; all of the data for this operation is stored in the referenced
-`Operation`. A side effect of this design is that we always pass around `Op`
-derived classes "by-value", instead of by reference or pointer (*passing by
-value* is a common idiom in MLIR and applies similarly to attributes, types,
-etc). Given a generic `Operation*` instance, we can always get a specific `Op`
-instance using LLVM's casting infrastructure:
+general API into an operation instance.
+
+On the other hand, each specific type of operation is represented by an `Op`
+derived class. For instance `ConstantOp` represents a operation with zero
+inputs, and one output, which is always set to the same value. `Op` derived
+classes act as smart pointer wrapper around a `Operation*`, provide
+operation-specific accessor methods, and type-safe properties of operations.
+
+When we define our Toy operations, we are defining a clean, semantically useful
+interface for building and interfacing with the `Operation` class. This is why
+our `ConstantOp` defines no class fields; all of the data for this operation is
+stored in the referenced `Operation`. A side effect of this design is that we
+always pass around `Op` derived classes "by-value", instead of by reference or
+pointer (*passing by value* is a common idiom in MLIR and applies similarly to
+attributes, types, etc). Given a generic `Operation*` instance, we can always
+get a specific `Op` instance using LLVM's casting infrastructure:
 
 ```c++
 void processConstantOp(mlir::Operation *operation) {
@@ -500,7 +539,7 @@ def ConstantOp : Toy_Op<"constant"> {
   // to `1` will generate a `::mlir::LogicalResult verify()` declaration on the
   // operation class that is called after ODS constructs have been verified, for
   // example the types of arguments and results. We implement additional verification
-  // in the definition of this `verify` method in the C++ source file. 
+  // in the definition of this `verify` method in the C++ source file.
   let hasVerifier = 1;
 }
 ```
